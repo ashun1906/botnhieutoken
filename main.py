@@ -89,7 +89,7 @@ async def send_broadcast(bot, post_id, admin_id=None):
     success, fail = 0, 0
     for gid in [g[0] for g in groups]:
         attempts = 0
-        while attempts < 10:
+        while attempts < 5:
             try:
                 if p_data.get("copy"):
                     sent = False
@@ -129,7 +129,7 @@ async def send_broadcast(bot, post_id, admin_id=None):
                     pass
                 await asyncio.sleep(getattr(e, "retry_after", 1) + 1.0)
                 attempts += 1
-                if attempts >= 10:
+                if attempts >= 5:
                     fail += 1
             except Forbidden as e:
                 try:
@@ -149,7 +149,7 @@ async def send_broadcast(bot, post_id, admin_id=None):
                 except:
                     pass
                 await asyncio.sleep(0.8 * attempts)
-                if attempts >= 10:
+                if attempts >= 5:
                     fail += 1
             except (NetworkError, TimedOut) as e:
                 attempts += 1
@@ -158,7 +158,7 @@ async def send_broadcast(bot, post_id, admin_id=None):
                 except:
                     pass
                 await asyncio.sleep(1.0 * attempts)
-                if attempts >= 10:
+                if attempts >= 5:
                     fail += 1
             except Exception as e:
                 attempts += 1
@@ -180,7 +180,7 @@ async def send_broadcast(bot, post_id, admin_id=None):
                     except Exception:
                         pass
                 await asyncio.sleep(1.0 * attempts)
-                if attempts >= 10:
+                if attempts >= 5:
                     fail += 1
     report = f"📊 Báo cáo bài #{post_id}: Thành công {success}, Thất bại {fail}"
     try: await bot.send_message(admin_id or OWNER_ID, report)
@@ -188,11 +188,11 @@ async def send_broadcast(bot, post_id, admin_id=None):
 
 _post_queue = _queue.Queue()
 _worker_thread = None
+_bot_loops = {}
 def _queue_worker():
     while True:
         item = _post_queue.get()
         try:
-            loop = None
             if isinstance(item, tuple) and len(item) == 3:
                 bot, post_id, admin_id = item
             elif isinstance(item, tuple) and len(item) == 2:
@@ -201,20 +201,27 @@ def _queue_worker():
             else:
                 _post_queue.task_done()
                 continue
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(send_broadcast(bot, post_id, admin_id))
+            loop = _bot_loops.get(id(bot))
+            if loop and loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(send_broadcast(bot, post_id, admin_id), loop)
+                try:
+                    fut.result()
+                except Exception as e:
+                    try:
+                        logging.error(f"Broadcast future error: {e}")
+                    except:
+                        pass
+            else:
+                try:
+                    logging.warning("Bot loop not found or not running; skipping broadcast")
+                except:
+                    pass
         except Exception as e:
             try:
                 logging.error(f"Queue worker error: {e}")
             except:
                 pass
         finally:
-            if 'loop' in locals() and loop is not None:
-                try:
-                    loop.close()
-                except:
-                    pass
             _post_queue.task_done()
             time.sleep(0.5)
 
@@ -223,10 +230,10 @@ def run_async_job(bot, post_id):
         _post_queue.put((bot, post_id, OWNER_ID))
     except:
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(send_broadcast(bot, post_id, OWNER_ID))
-            loop.close()
+            loop = _bot_loops.get(id(bot))
+            if loop and loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(send_broadcast(bot, post_id, OWNER_ID), loop)
+                fut.result()
         except:
             pass
 
@@ -562,6 +569,7 @@ def run_bot(token):
 
     app = ApplicationBuilder().token(token).build()
     reload_schedules(app.bot)
+    _bot_loops[id(app.bot)] = loop
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(handle_callback)],
