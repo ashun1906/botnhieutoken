@@ -55,13 +55,22 @@ def db_execute(query, params=(), fetch=False):
         conn.close()
 
 def init_db():
-    db_execute('''CREATE TABLE IF NOT EXISTS groups (id INTEGER PRIMARY KEY, title TEXT, active INTEGER DEFAULT 1)''')
+    db_execute('''CREATE TABLE IF NOT EXISTS groups (id INTEGER, bot_id INTEGER, title TEXT, active INTEGER DEFAULT 1, PRIMARY KEY (bot_id, id))''')
     db_execute('''CREATE TABLE IF NOT EXISTS admins (id INTEGER PRIMARY KEY, name TEXT)''')
     db_execute('''CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT)''')
     db_execute('''CREATE TABLE IF NOT EXISTS schedules (time TEXT, post_id INTEGER, PRIMARY KEY (time, post_id))''')
     db_execute('INSERT OR IGNORE INTO admins VALUES (?, ?)', (OWNER_ID, "Chủ Nhân"))
 
 init_db()
+def _migrate_groups_table():
+    try:
+        cols = db_execute("PRAGMA table_info(groups)", fetch=True)
+        names = [c[1] for c in cols]
+        if 'bot_id' not in names:
+            db_execute("ALTER TABLE groups ADD COLUMN bot_id INTEGER")
+    except:
+        pass
+_migrate_groups_table()
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 scheduler = BackgroundScheduler(
     executors={'default': ThreadPoolExecutor(1)},
@@ -85,7 +94,14 @@ async def send_broadcast(bot, post_id, admin_id=None):
     if not res: return
     p_data = json.loads(res[0][0])
     ent = [MessageEntity(**en) for en in p_data["entities"]] if p_data.get("entities") else None
-    groups = db_execute("SELECT id FROM groups WHERE active = 1", fetch=True)
+    try:
+        bid = bot.id
+    except:
+        bid = None
+    if bid is not None:
+        groups = db_execute("SELECT id FROM groups WHERE active = 1 AND (bot_id = ? OR bot_id IS NULL)", (bid,), fetch=True)
+    else:
+        groups = db_execute("SELECT id FROM groups WHERE active = 1", fetch=True)
     success, fail = 0, 0
     for gid in [g[0] for g in groups]:
         attempts = 0
@@ -137,7 +153,10 @@ async def send_broadcast(bot, post_id, admin_id=None):
                 except:
                     pass
                 try:
-                    db_execute("UPDATE groups SET active = 0 WHERE id = ?", (gid,))
+                    if bid is not None:
+                        db_execute("UPDATE groups SET active = 0 WHERE id = ? AND (bot_id = ? OR bot_id IS NULL)", (gid, bid))
+                    else:
+                        db_execute("UPDATE groups SET active = 0 WHERE id = ?", (gid,))
                 except:
                     pass
                 fail += 1
@@ -346,7 +365,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚙️ QUẢN LÝ:", reply_markup=InlineKeyboardMarkup(kb))
 
     elif data == 'show_groups':
-        groups = db_execute("SELECT title, id FROM groups WHERE active = 1", fetch=True)
+        bid = getattr(context.bot, "id", None)
+        if bid is not None:
+            groups = db_execute("SELECT title, id FROM groups WHERE active = 1 AND (bot_id = ? OR bot_id IS NULL)", (bid,), fetch=True)
+        else:
+            groups = db_execute("SELECT title, id FROM groups WHERE active = 1", fetch=True)
         text = "📋 **NHÓM:**\n" + ("\n".join([f"• {g[0]} (`{g[1]}`)" for g in groups]) if groups else "Trống")
         kb = [
             [InlineKeyboardButton("🗑 Xóa Nhóm", callback_data='del_group')],
@@ -355,7 +378,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     elif data == 'del_group':
-        groups = db_execute("SELECT id, title FROM groups WHERE active = 1", fetch=True)
+        bid = getattr(context.bot, "id", None)
+        if bid is not None:
+            groups = db_execute("SELECT id, title FROM groups WHERE active = 1 AND (bot_id = ? OR bot_id IS NULL)", (bid,), fetch=True)
+        else:
+            groups = db_execute("SELECT id, title FROM groups WHERE active = 1", fetch=True)
         if not groups:
             kb = [[InlineKeyboardButton("🔙", callback_data='show_groups')]]
             await query.edit_message_text("❌ Không có nhóm nào để xóa.", reply_markup=InlineKeyboardMarkup(kb))
@@ -366,11 +393,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith('delgroup_'):
         gid = int(data.split('_')[1])
-        db_execute("DELETE FROM groups WHERE id = ?", (gid,))
+        bid = getattr(context.bot, "id", None)
+        if bid is not None:
+            db_execute("DELETE FROM groups WHERE id = ? AND (bot_id = ? OR bot_id IS NULL)", (gid, bid))
+        else:
+            db_execute("DELETE FROM groups WHERE id = ?", (gid,))
         await query.edit_message_text(f"✅ Đã xóa Nhóm {gid}.")
         
         # Refresh group list
-        groups = db_execute("SELECT id, title FROM groups WHERE active = 1", fetch=True)
+        if bid is not None:
+            groups = db_execute("SELECT id, title FROM groups WHERE active = 1 AND (bot_id = ? OR bot_id IS NULL)", (bid,), fetch=True)
+        else:
+            groups = db_execute("SELECT id, title FROM groups WHERE active = 1", fetch=True)
         if not groups:
             kb = [[InlineKeyboardButton("🔙", callback_data='show_groups')]]
             await query.edit_message_text("Tất cả các nhóm đã bị xóa.", reply_markup=InlineKeyboardMarkup(kb))
@@ -538,15 +572,30 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         return
     status = chm.new_chat_member.status
     if status in ("member", "administrator"):
-        db_execute("INSERT OR IGNORE INTO groups (id, title, active) VALUES (?, ?, 1)", (chat.id, chat.title or ""))
-        db_execute("UPDATE groups SET title = ?, active = 1 WHERE id = ?", (chat.title or "", chat.id))
+        bid = getattr(context.bot, "id", None)
+        if bid is not None:
+            db_execute("INSERT OR IGNORE INTO groups (id, bot_id, title, active) VALUES (?, ?, ?, 1)", (chat.id, bid, chat.title or ""))
+            db_execute("UPDATE groups SET title = ?, active = 1 WHERE id = ? AND (bot_id = ? OR bot_id IS NULL)", (chat.title or "", chat.id, bid))
+            db_execute("UPDATE groups SET bot_id = ? WHERE id = ? AND bot_id IS NULL", (bid, chat.id))
+        else:
+            db_execute("INSERT OR IGNORE INTO groups (id, title, active) VALUES (?, ?, 1)", (chat.id, chat.title or ""))
+            db_execute("UPDATE groups SET title = ?, active = 1 WHERE id = ?", (chat.title or "", chat.id))
     elif status in ("left", "kicked"):
-        db_execute("UPDATE groups SET active = 0 WHERE id = ?", (chat.id,))
+        bid = getattr(context.bot, "id", None)
+        if bid is not None:
+            db_execute("UPDATE groups SET active = 0 WHERE id = ? AND (bot_id = ? OR bot_id IS NULL)", (chat.id, bid))
+        else:
+            db_execute("UPDATE groups SET active = 0 WHERE id = ?", (chat.id,))
 
 async def track_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update and update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
-            db_execute("INSERT OR IGNORE INTO groups (id, title, active) VALUES (?, ?, 1)", (update.effective_chat.id, update.effective_chat.title))
+            bid = getattr(context.bot, "id", None)
+            if bid is not None:
+                db_execute("INSERT OR IGNORE INTO groups (id, bot_id, title, active) VALUES (?, ?, ?, 1)", (update.effective_chat.id, bid, update.effective_chat.title))
+                db_execute("UPDATE groups SET bot_id = ? WHERE id = ? AND bot_id IS NULL", (bid, update.effective_chat.id))
+            else:
+                db_execute("INSERT OR IGNORE INTO groups (id, title, active) VALUES (?, ?, 1)", (update.effective_chat.id, update.effective_chat.title))
     except:
         pass
 
