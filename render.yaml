@@ -15,3 +15,5 @@ services:
         sync: false
       - key: TZ
         value: Asia/Ho_Chi_Minh
+      - key: PYTHON_VERSION
+        value: 3.12.2
