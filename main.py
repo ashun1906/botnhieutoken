@@ -571,7 +571,7 @@ def run_bot(token):
     
     bot_info = loop.run_until_complete(app.bot.get_me())
     print(f"Bot '{bot_info.username}' is running...")
-    app.run_polling(close_loop=False)
+    app.run_polling(stop_signals=None, close_loop=False)
 
 if __name__ == '__main__':
     _start_http_server()
